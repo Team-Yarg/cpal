@@ -37,7 +37,12 @@ unsafe extern "C" fn frame_callback(data: *mut std::ffi::c_void) {
 
 impl Host {
     pub fn new() -> Result<Self, HostUnavailable> {
-        let inst = Ndsp::new().map_err(|_| HostUnavailable)?;
+        let inst = Ndsp::new().map_err(|e| match e {
+            ctru::Error::ServiceAlreadyActive => panic!("already initialised Ndsp"),
+            ctru::Error::Os(o) => panic!("os: {o}"),
+            ctru::Error::Libc(s) => panic!("libc: {s}"),
+            _ => HostUnavailable,
+        })?;
         let streams = Arc::<StreamPool>::default();
         let data = Box::pin(HostData { inst, streams });
         unsafe { ctru_sys::ndspSetCallback(Some(frame_callback), (&(*data) as *const _) as *mut _) }
