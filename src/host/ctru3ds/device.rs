@@ -9,16 +9,27 @@ use ctru::{
 };
 
 use crate::{
-    host::ctru3ds::DEFAULT_BUFFER_SIZE,
     traits::{DeviceTrait, StreamTrait},
     Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, StreamInstant,
-    SupportedBufferSize, SupportedInputConfigs, SupportedOutputConfigs,
+    SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
 };
+
+pub type SupportedInputConfigs = std::iter::Once<SupportedStreamConfigRange>;
+pub type SupportedOutputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 
 use super::StreamPool;
 
+#[derive(Clone)]
 pub struct Device {
     streams: Arc<StreamPool>,
+}
+pub struct Devices(pub Option<Device>);
+impl Iterator for Devices {
+    type Item = Device;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.take()
+    }
 }
 
 impl Device {
@@ -46,7 +57,14 @@ impl DeviceTrait for Device {
     fn supported_output_configs(
         &self,
     ) -> Result<Self::SupportedOutputConfigs, crate::SupportedStreamConfigsError> {
-        Ok(std::iter::once(self.default_output_config()?))
+        let def = self.default_output_config().unwrap();
+        Ok(std::iter::once(SupportedStreamConfigRange {
+            channels: def.channels,
+            min_sample_rate: def.sample_rate,
+            max_sample_rate: def.sample_rate,
+            buffer_size: def.buffer_size,
+            sample_format: def.sample_format,
+        }))
     }
 
     fn default_input_config(
@@ -115,7 +133,7 @@ impl DeviceTrait for Device {
             crate::BufferSize::Default => (config.sample_rate.0 as f32 * 120.0 / 1000.0) as usize,
             crate::BufferSize::Fixed(_) => todo!(),
         };
-        let wave_sz = buf_sz * config.channels * sample_format.sample_size();
+        let wave_sz = buf_sz * config.channels as usize * sample_format.sample_size();
         assert!(wave_sz > 0);
         let playing = Arc::new(AtomicBool::new(false));
         let wave_buf = wave::Wave::new(
@@ -138,24 +156,25 @@ impl DeviceTrait for Device {
             }
             chan.set_format(format);
             chan.set_interpolation(ndsp::InterpolationType::Linear);
-            chan.set_sample_rate(config.sample_rate.0);
+            chan.set_sample_rate(config.sample_rate.0 as f32);
 
-            let mut buf = wave.get_buffer_mut().unwrap();
+            let mut buf = wave_buf.get_buffer_mut().unwrap();
 
             let len = buf.len();
-            let mut data = unsafe { Data::from_parts(&mut buf, len, sample_format) };
+            let mut data =
+                unsafe { Data::from_parts(buf.as_mut_ptr() as *mut _, len, sample_format) };
             let now = Instant::now();
             let elapsed = now - start;
             let timestamp = OutputStreamTimestamp {
-                callback: StreamInstant::from_nanos(elapsed.as_nanos()),
-                playback: StreamInstant::from_nanos(elapsed.as_nanos()),
+                callback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
+                playback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
             };
             data_callback(&mut data, &OutputCallbackInfo { timestamp });
 
             chan.queue_wave(&mut wave_buf);
         });
         Ok(super::stream::Stream {
-            paused,
+            playing,
             pool: self.streams.clone(),
             id,
         })

@@ -2,7 +2,7 @@
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Mutex, RwLock,
+    Arc, Mutex, RwLock,
 };
 
 use ctru::{
@@ -10,10 +10,9 @@ use ctru::{
     services::ndsp::{self, wave, AudioFormat, Ndsp},
 };
 
-use crate::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    Devices,
-};
+use crate::{traits::HostTrait, HostUnavailable};
+pub use device::{Device, Devices, SupportedInputConfigs, SupportedOutputConfigs};
+pub use stream::Stream;
 
 mod device;
 mod stream;
@@ -24,11 +23,11 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn new() -> Self {
-        Self {
-            inst: Ndsp::new().unwrap(),
+    pub fn new() -> Result<Self, HostUnavailable> {
+        Ok(Self {
+            inst: Ndsp::new().map_err(|_| HostUnavailable)?,
             streams: Default::default(),
-        }
+        })
     }
 }
 impl HostTrait for Host {
@@ -40,7 +39,7 @@ impl HostTrait for Host {
     }
 
     fn devices(&self) -> Result<Self::Devices, crate::DevicesError> {
-        Ok(std::iter::once(device::Device::new(self.streams.clone())))
+        Ok(Devices(Some(Device::new(self.streams.clone()))))
     }
 
     fn default_input_device(&self) -> Option<Self::Device> {
@@ -48,7 +47,7 @@ impl HostTrait for Host {
     }
 
     fn default_output_device(&self) -> Option<Self::Device> {
-        self.output_devices().ok().and_then(|d| d.next())
+        self.output_devices().ok().and_then(|mut d| d.next())
     }
 }
 
@@ -68,12 +67,13 @@ struct StreamPool {
 }
 
 impl StreamPool {
-    fn add_stream(&self, cb: impl Into<Box<StreamCallback>>) -> usize {
+    fn add_stream(&self, cb: impl FnMut(&ndsp::Channel) + 'static) -> usize {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.callbacks
-            .lock()
-            .unwrap()
-            .push(CallbackBlock { id, cb: cb.into() });
+        self.callbacks.lock().unwrap().push(CallbackBlock {
+            id,
+            cb: Box::new(cb),
+        });
+        id
     }
     fn remove_stream(&self, id: usize) {
         let mut callbacks = self.callbacks.lock().unwrap();
@@ -87,9 +87,10 @@ impl StreamPool {
     fn tick(&self, inst: &Ndsp) {
         // todo: scheduler to pick free channels
         let mut chan_id = 0;
-        for cb in self.callbacks.lock().unwrap() {
+        let mut cbs = self.callbacks.lock().unwrap();
+        for block in cbs.iter_mut() {
             let chan = inst.channel(chan_id as u8).unwrap();
-            (*cb)(&chan);
+            (block.cb)(&chan);
             chan_id = (chan_id + 1) % MAX_CHANNEL;
         }
     }

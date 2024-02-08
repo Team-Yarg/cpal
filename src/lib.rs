@@ -33,7 +33,7 @@
 //! ```
 //!
 //! Before we can create a stream, we must decide what the configuration of the audio stream is
-//! going to be.    
+//! going to be.
 //! You can query all the supported configurations with the
 //! [`supported_input_configs()`] and [`supported_output_configs()`] methods.
 //! These produce a list of [`SupportedStreamConfigRange`] structs which can later be turned into
@@ -154,7 +154,7 @@
 //! [`supported_output_configs()`]: traits::DeviceTrait::supported_output_configs
 
 #![recursion_limit = "2048"]
-
+#![cfg_attr(target_os = "horizon", feature(allocator_api))]
 // Extern crate declarations with `#[macro_use]` must unfortunately be at crate root.
 #[cfg(target_os = "emscripten")]
 #[macro_use]
@@ -225,7 +225,7 @@ pub type FrameCount = u32;
 /// behavior of the given host. Note, the default buffer size may be surprisingly
 /// large, leading to latency issues. If low latency is desired, [`Fixed(FrameCount)`]
 /// should be used in accordance with the [`SupportedBufferSize`] range produced by
-/// the [`SupportedStreamConfig`] API.  
+/// the [`SupportedStreamConfig`] API.
 ///
 /// [`Default`]: BufferSize::Default
 /// [`Fixed(FrameCount)`]: BufferSize::Fixed

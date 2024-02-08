@@ -1,22 +1,27 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::{atomic::AtomicBool, Arc};
 
 use ctru::services::ndsp;
+
+use crate::traits::StreamTrait;
 
 use super::StreamPool;
 
 pub struct Stream {
-    pub paused: Arc<AtomicBool>,
+    pub playing: Arc<AtomicBool>,
     pub pool: Arc<StreamPool>,
     pub id: usize,
 }
 
 impl StreamTrait for Stream {
     fn play(&self) -> Result<(), crate::PlayStreamError> {
-        self.paused.set()
+        self.playing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     fn pause(&self) -> Result<(), crate::PauseStreamError> {
-        self.chan.set_paused(true);
+        self.playing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }

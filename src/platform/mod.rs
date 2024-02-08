@@ -697,11 +697,15 @@ mod platform_impl {
 }
 #[cfg(target_os = "horizon")]
 mod platform_impl {
-    use crate::host::ctru3ds::Host as Ctru3dsHost;
+    use crate::host::ctru3ds::{
+        Device as Ctru3dsDevice, Host as Ctru3dsHost, Stream as Ctru3dsStream,
+        SupportedInputConfigs as Ctru3dsSupportedInputConfigs,
+        SupportedOutputConfigs as Ctru3dsSupportedOutputConfigs,
+    };
 
     impl_platform_host!(Ctru3ds ctru3ds "CTRU3DS");
     pub fn default_host() -> Host {
-        Ctru3dsHost::new().into()
+        Ctru3dsHost::new().unwrap().into()
     }
 }
 
