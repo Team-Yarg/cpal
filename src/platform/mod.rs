@@ -695,6 +695,15 @@ mod platform_impl {
             .into()
     }
 }
+#[cfg(target_os = "horizon")]
+mod platform_impl {
+    use crate::host::ctru3ds::Host as Ctru3dsHost;
+
+    impl_platform_host!(Ctru3ds ctru3ds "CTRU3DS");
+    pub fn default_host() -> Host {
+        Ctru3dsHost::new().into()
+    }
+}
 
 #[cfg(not(any(
     windows,
@@ -707,6 +716,7 @@ mod platform_impl {
     target_os = "emscripten",
     target_os = "android",
     all(target_arch = "wasm32", feature = "wasm-bindgen"),
+    target_os = "horizon",
 )))]
 mod platform_impl {
     pub use crate::host::null::{

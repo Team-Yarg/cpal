@@ -9,6 +9,8 @@ pub(crate) mod alsa;
 pub(crate) mod asio;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) mod coreaudio;
+#[cfg(target_os = "horizon")]
+pub(crate) mod ctru3ds;
 #[cfg(target_os = "emscripten")]
 pub(crate) mod emscripten;
 #[cfg(all(
