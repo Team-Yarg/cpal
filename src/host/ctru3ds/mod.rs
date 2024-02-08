@@ -25,9 +25,16 @@ struct HostData {
     inst: Ndsp,
     streams: Arc<StreamPool>,
 }
+impl Drop for HostData {
+    fn drop(&mut self) {
+        unsafe {
+            ctru_sys::ndspSetCallback(None, std::ptr::null_mut());
+        }
+    }
+}
 
 pub struct Host {
-    data: Pin<Box<HostData>>,
+    data: Pin<Arc<HostData>>,
 }
 
 unsafe extern "C" fn frame_callback(data: *mut std::ffi::c_void) {
@@ -44,7 +51,7 @@ impl Host {
             _ => HostUnavailable,
         })?;
         let streams = Arc::<StreamPool>::default();
-        let data = Box::pin(HostData { inst, streams });
+        let data = Arc::pin(HostData { inst, streams });
         unsafe { ctru_sys::ndspSetCallback(Some(frame_callback), (&(*data) as *const _) as *mut _) }
         Ok(Self { data })
     }
@@ -58,7 +65,7 @@ impl HostTrait for Host {
     }
 
     fn devices(&self) -> Result<Self::Devices, crate::DevicesError> {
-        Ok(Devices(Some(Device::new(self.data.streams.clone()))))
+        Ok(Devices(Some(Device::new(self.data.clone()))))
     }
 
     fn default_input_device(&self) -> Option<Self::Device> {
@@ -67,13 +74,6 @@ impl HostTrait for Host {
 
     fn default_output_device(&self) -> Option<Self::Device> {
         self.output_devices().ok().and_then(|mut d| d.next())
-    }
-}
-impl Drop for Host {
-    fn drop(&mut self) {
-        unsafe {
-            ctru_sys::ndspSetCallback(None, std::ptr::null_mut());
-        }
     }
 }
 
@@ -102,6 +102,7 @@ impl StreamPool {
         id
     }
     fn remove_stream(&self, id: usize) {
+        println!("remove stream");
         let mut callbacks = self.callbacks.lock().unwrap();
         let idx = callbacks
             .iter()
@@ -111,6 +112,7 @@ impl StreamPool {
     }
 
     fn tick(&self, inst: &Ndsp) {
+        println!("tick");
         // todo: scheduler to pick free channels
         let mut chan_id = 0;
         let mut cbs = self.callbacks.lock().unwrap();

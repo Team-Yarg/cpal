@@ -1,14 +1,17 @@
-use std::sync::{atomic::AtomicBool, Arc};
+use std::{
+    pin::Pin,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use ctru::services::ndsp;
 
 use crate::traits::StreamTrait;
 
-use super::StreamPool;
+use super::{HostData, StreamPool};
 
 pub struct Stream {
     pub playing: Arc<AtomicBool>,
-    pub pool: Arc<StreamPool>,
+    pub host_data: Pin<Arc<HostData>>,
     pub id: usize,
 }
 
@@ -27,6 +30,6 @@ impl StreamTrait for Stream {
 }
 impl Drop for Stream {
     fn drop(&mut self) {
-        self.pool.remove_stream(self.id);
+        self.host_data.streams.remove_stream(self.id);
     }
 }

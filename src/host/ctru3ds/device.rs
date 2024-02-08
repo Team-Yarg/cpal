@@ -1,4 +1,5 @@
 use std::{
+    pin::Pin,
     sync::{atomic::AtomicBool, Arc},
     time::Instant,
 };
@@ -17,11 +18,11 @@ use crate::{
 pub type SupportedInputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 pub type SupportedOutputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 
-use super::StreamPool;
+use super::{HostData, StreamPool};
 
 #[derive(Clone)]
 pub struct Device {
-    streams: Arc<StreamPool>,
+    data: Pin<Arc<HostData>>,
 }
 pub struct Devices(pub Option<Device>);
 impl Iterator for Devices {
@@ -33,8 +34,8 @@ impl Iterator for Devices {
 }
 
 impl Device {
-    pub fn new(streams: Arc<StreamPool>) -> Self {
-        Self { streams }
+    pub fn new(data: Pin<Arc<HostData>>) -> Self {
+        Self { data }
     }
 }
 impl DeviceTrait for Device {
@@ -147,7 +148,7 @@ impl DeviceTrait for Device {
         );
         let start = Instant::now();
         let config = config.clone();
-        let id = self.streams.add_stream({
+        let id = self.data.streams.add_stream({
             let playing = playing.clone();
             move |chan| {
                 if !playing.load(std::sync::atomic::Ordering::SeqCst) {
@@ -181,7 +182,7 @@ impl DeviceTrait for Device {
         });
         Ok(super::stream::Stream {
             playing,
-            pool: self.streams.clone(),
+            host_data: self.data.clone(),
             id,
         })
     }
