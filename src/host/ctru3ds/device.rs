@@ -103,7 +103,7 @@ impl DeviceTrait for Device {
         &self,
         config: &crate::StreamConfig,
         sample_format: crate::SampleFormat,
-        data_callback: D,
+        mut data_callback: D,
         error_callback: E,
         timeout: Option<std::time::Duration>,
     ) -> Result<Self::Stream, crate::BuildStreamError>
@@ -136,7 +136,7 @@ impl DeviceTrait for Device {
         let wave_sz = buf_sz * config.channels as usize * sample_format.sample_size();
         assert!(wave_sz > 0);
         let playing = Arc::new(AtomicBool::new(false));
-        let wave_buf = wave::Wave::new(
+        let mut wave_buf = wave::Wave::new(
             {
                 let mut v = Vec::with_capacity_in(wave_sz, LinearAllocator);
                 v.resize(wave_sz, 0);
@@ -146,32 +146,35 @@ impl DeviceTrait for Device {
             false,
         );
         let start = Instant::now();
-        let nb_chans = config.channels as usize;
-        let id = self.streams.add_stream(move |chan: &ndsp::Channel| {
-            if !playing.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
+        let config = config.clone();
+        let id = self.streams.add_stream({
+            let playing = playing.clone();
+            move |chan| {
+                if !playing.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                if wave_buf.status() != wave::Status::Done {
+                    return;
+                }
+                chan.set_format(format);
+                chan.set_interpolation(ndsp::InterpolationType::Linear);
+                chan.set_sample_rate(config.sample_rate.0 as f32);
+
+                let buf = wave_buf.get_buffer_mut().unwrap();
+
+                let len = buf.len();
+                let mut data =
+                    unsafe { Data::from_parts(buf.as_mut_ptr() as *mut _, len, sample_format) };
+                let now = Instant::now();
+                let elapsed = now - start;
+                let timestamp = OutputStreamTimestamp {
+                    callback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
+                    playback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
+                };
+                data_callback(&mut data, &OutputCallbackInfo { timestamp });
+
+                chan.queue_wave(&mut wave_buf).unwrap();
             }
-            if wave_buf.status() != wave::Status::Done {
-                return;
-            }
-            chan.set_format(format);
-            chan.set_interpolation(ndsp::InterpolationType::Linear);
-            chan.set_sample_rate(config.sample_rate.0 as f32);
-
-            let mut buf = wave_buf.get_buffer_mut().unwrap();
-
-            let len = buf.len();
-            let mut data =
-                unsafe { Data::from_parts(buf.as_mut_ptr() as *mut _, len, sample_format) };
-            let now = Instant::now();
-            let elapsed = now - start;
-            let timestamp = OutputStreamTimestamp {
-                callback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
-                playback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
-            };
-            data_callback(&mut data, &OutputCallbackInfo { timestamp });
-
-            chan.queue_wave(&mut wave_buf);
         });
         Ok(super::stream::Stream {
             playing,

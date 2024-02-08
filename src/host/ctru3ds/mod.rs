@@ -53,7 +53,7 @@ impl HostTrait for Host {
 
 const MAX_CHANNEL: usize = 24;
 
-type StreamCallback = dyn FnMut(&ndsp::Channel);
+type StreamCallback = dyn FnMut(&mut ndsp::Channel);
 
 struct CallbackBlock {
     id: usize,
@@ -67,7 +67,7 @@ struct StreamPool {
 }
 
 impl StreamPool {
-    fn add_stream(&self, cb: impl FnMut(&ndsp::Channel) + 'static) -> usize {
+    fn add_stream(&self, cb: impl FnMut(&mut ndsp::Channel) + 'static) -> usize {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.callbacks.lock().unwrap().push(CallbackBlock {
             id,
@@ -89,8 +89,8 @@ impl StreamPool {
         let mut chan_id = 0;
         let mut cbs = self.callbacks.lock().unwrap();
         for block in cbs.iter_mut() {
-            let chan = inst.channel(chan_id as u8).unwrap();
-            (block.cb)(&chan);
+            let mut chan = inst.channel(chan_id as u8).unwrap();
+            (block.cb)(&mut chan);
             chan_id = (chan_id + 1) % MAX_CHANNEL;
         }
     }
