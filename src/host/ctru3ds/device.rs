@@ -153,7 +153,10 @@ impl DeviceTrait for Device {
                 if !playing.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                if wave_buf.status() != wave::Status::Done {
+                if matches!(
+                    wave_buf.status(),
+                    wave::Status::Playing | wave::Status::Queued
+                ) {
                     return;
                 }
                 chan.set_format(format);
