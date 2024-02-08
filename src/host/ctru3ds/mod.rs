@@ -1,8 +1,12 @@
 #![feature(allocator_api)]
 
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex, RwLock,
+use std::{
+    ops::DerefMut,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock,
+    },
 };
 
 use ctru::{
@@ -17,17 +21,27 @@ pub use stream::Stream;
 mod device;
 mod stream;
 
-pub struct Host {
+struct HostData {
     inst: Ndsp,
     streams: Arc<StreamPool>,
 }
 
+pub struct Host {
+    data: Pin<Box<HostData>>,
+}
+
+unsafe extern "C" fn frame_callback(data: *mut std::ffi::c_void) {
+    let data = data.cast_const().cast::<HostData>().as_ref().unwrap();
+    data.streams.tick(&data.inst);
+}
+
 impl Host {
     pub fn new() -> Result<Self, HostUnavailable> {
-        Ok(Self {
-            inst: Ndsp::new().map_err(|_| HostUnavailable)?,
-            streams: Default::default(),
-        })
+        let inst = Ndsp::new().map_err(|_| HostUnavailable)?;
+        let streams = Arc::<StreamPool>::default();
+        let data = Box::pin(HostData { inst, streams });
+        unsafe { ctru_sys::ndspSetCallback(Some(frame_callback), (&(*data) as *const _) as *mut _) }
+        Ok(Self { data })
     }
 }
 impl HostTrait for Host {
@@ -39,7 +53,7 @@ impl HostTrait for Host {
     }
 
     fn devices(&self) -> Result<Self::Devices, crate::DevicesError> {
-        Ok(Devices(Some(Device::new(self.streams.clone()))))
+        Ok(Devices(Some(Device::new(self.data.streams.clone()))))
     }
 
     fn default_input_device(&self) -> Option<Self::Device> {
@@ -48,6 +62,13 @@ impl HostTrait for Host {
 
     fn default_output_device(&self) -> Option<Self::Device> {
         self.output_devices().ok().and_then(|mut d| d.next())
+    }
+}
+impl Drop for Host {
+    fn drop(&mut self) {
+        unsafe {
+            ctru_sys::ndspSetCallback(None, std::ptr::null_mut());
+        }
     }
 }
 

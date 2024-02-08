@@ -76,6 +76,7 @@ jni = "0.21"
 
 [target.'cfg(target_os = "horizon")'.dependencies]
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs" }
 
 [[example]]
 name = "android"
