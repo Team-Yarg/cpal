@@ -1,6 +1,7 @@
 use std::{
+    ops::{Deref, DerefMut},
     pin::Pin,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
     time::Instant,
 };
 
@@ -10,6 +11,7 @@ use ctru::{
 };
 
 use crate::{
+    host::ctru3ds::NB_WAVE_BUFFERS,
     traits::{DeviceTrait, StreamTrait},
     Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, StreamInstant,
     SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
@@ -137,15 +139,17 @@ impl DeviceTrait for Device {
         let wave_sz = buf_sz * config.channels as usize * sample_format.sample_size();
         assert!(wave_sz > 0);
         let playing = Arc::new(AtomicBool::new(false));
-        let mut wave_buf = wave::Wave::new(
-            {
-                let mut v = Vec::with_capacity_in(wave_sz, LinearAllocator);
-                v.resize(wave_sz, 0);
-                v.into_boxed_slice()
-            },
-            format,
-            false,
-        );
+        let mut wave_bufs: [WaveWrap; NB_WAVE_BUFFERS] = std::array::from_fn(|_| {
+            WaveWrap(wave::Wave::new(
+                {
+                    let mut v = Vec::with_capacity_in(wave_sz, LinearAllocator);
+                    v.resize(wave_sz, 0);
+                    v.into_boxed_slice()
+                },
+                format,
+                false,
+            ))
+        });
         let start = Instant::now();
         let config = config.clone();
         let id = self.data.streams.add_stream({
@@ -154,12 +158,15 @@ impl DeviceTrait for Device {
                 if !playing.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                if matches!(
-                    wave_buf.status(),
-                    wave::Status::Playing | wave::Status::Queued
-                ) {
+
+                let Some(WaveWrap(ref mut wave_buf)) = wave_bufs.iter_mut().find(|w| {
+                    !matches!(w.0.status(), wave::Status::Playing | wave::Status::Queued)
+                }) else {
+                    println!("no aval bufs");
                     return;
-                }
+                };
+                println!("add next");
+
                 chan.set_format(format);
                 chan.set_interpolation(ndsp::InterpolationType::Linear);
                 chan.set_sample_rate(config.sample_rate.0 as f32);
@@ -175,9 +182,9 @@ impl DeviceTrait for Device {
                     callback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
                     playback: StreamInstant::from_nanos(elapsed.as_nanos() as i64),
                 };
-                data_callback(&mut data, &OutputCallbackInfo { timestamp });
 
-                chan.queue_wave(&mut wave_buf).unwrap();
+                data_callback(&mut data, &OutputCallbackInfo { timestamp });
+                chan.queue_wave(wave_buf).unwrap();
             }
         });
         Ok(super::stream::Stream {
@@ -185,5 +192,21 @@ impl DeviceTrait for Device {
             host_data: self.data.clone(),
             id,
         })
+    }
+}
+
+struct WaveWrap(wave::Wave);
+unsafe impl Send for WaveWrap {}
+unsafe impl Sync for WaveWrap {}
+impl Deref for WaveWrap {
+    type Target = wave::Wave;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for WaveWrap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
