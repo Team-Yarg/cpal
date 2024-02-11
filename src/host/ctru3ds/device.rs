@@ -13,7 +13,7 @@ use ctru::{
 use crate::{
     host::ctru3ds::NB_WAVE_BUFFERS,
     traits::{DeviceTrait, StreamTrait},
-    Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, StreamInstant,
+    Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, SizedSample, StreamInstant,
     SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
 };
 
@@ -21,6 +21,8 @@ pub type SupportedInputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 pub type SupportedOutputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 
 use super::{HostData, StreamPool};
+
+const FRAME_LEN: f32 = 160.0 / 32728.0;
 
 #[derive(Clone)]
 pub struct Device {
@@ -81,7 +83,7 @@ impl DeviceTrait for Device {
     ) -> Result<crate::SupportedStreamConfig, crate::DefaultStreamConfigError> {
         Ok(crate::SupportedStreamConfig {
             channels: 2,
-            sample_rate: crate::SampleRate(44000),
+            sample_rate: crate::SampleRate(44100),
             buffer_size: SupportedBufferSize::Unknown,
             sample_format: SampleFormat::U16,
         })
@@ -132,18 +134,18 @@ impl DeviceTrait for Device {
             }
             _ => unreachable!(),
         };
-        let buf_sz = match config.buffer_size {
+        let buf_samples = match config.buffer_size {
             crate::BufferSize::Default => (config.sample_rate.0 as f32 * 120.0 / 1000.0) as usize,
             crate::BufferSize::Fixed(_) => todo!(),
         };
-        let wave_sz = buf_sz * config.channels as usize * sample_format.sample_size();
-        assert!(wave_sz > 0);
+        let buf_bytes = buf_samples * format.size();
+        assert!(buf_bytes > 0);
         let playing = Arc::new(AtomicBool::new(false));
         let mut wave_bufs: [WaveWrap; NB_WAVE_BUFFERS] = std::array::from_fn(|_| {
             WaveWrap(wave::Wave::new(
                 {
-                    let mut v = Vec::with_capacity_in(wave_sz, LinearAllocator);
-                    v.resize(wave_sz, 0);
+                    let mut v = Vec::with_capacity_in(buf_bytes, LinearAllocator);
+                    v.resize(buf_bytes, 0);
                     v.into_boxed_slice()
                 },
                 format,
@@ -158,22 +160,24 @@ impl DeviceTrait for Device {
                 if !playing.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
+                if wave_bufs.iter().all(|w| w.status() == wave::Status::Done) {
+                    println!("all wave buffers have completed, uh oh");
+                }
 
                 let Some(WaveWrap(ref mut wave_buf)) = wave_bufs.iter_mut().find(|w| {
                     !matches!(w.0.status(), wave::Status::Playing | wave::Status::Queued)
                 }) else {
-                    println!("no aval bufs");
                     return;
                 };
-                println!("add next");
 
                 chan.set_format(format);
                 chan.set_interpolation(ndsp::InterpolationType::Linear);
                 chan.set_sample_rate(config.sample_rate.0 as f32);
 
                 let buf = wave_buf.get_buffer_mut().unwrap();
+                assert_eq!(buf.len(), buf_bytes);
 
-                let len = buf.len();
+                let len = buf.len() / sample_format.sample_size();
                 let mut data =
                     unsafe { Data::from_parts(buf.as_mut_ptr() as *mut _, len, sample_format) };
                 let now = Instant::now();
@@ -184,6 +188,7 @@ impl DeviceTrait for Device {
                 };
 
                 data_callback(&mut data, &OutputCallbackInfo { timestamp });
+                wave_buf.set_sample_count(buf_samples).unwrap();
                 chan.queue_wave(wave_buf).unwrap();
             }
         });

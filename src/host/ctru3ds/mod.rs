@@ -1,5 +1,3 @@
-#![feature(allocator_api)]
-
 use std::{
     ops::DerefMut,
     pin::Pin,
@@ -9,6 +7,7 @@ use std::{
         Arc, Condvar, Mutex, RwLock, Weak,
     },
     thread::{JoinHandle, Thread},
+    time::Duration,
 };
 
 use ctru::{
@@ -24,12 +23,13 @@ mod device;
 mod stream;
 
 struct HostData {
-    inst: Arc<Mutex<Ndsp>>,
     streams: Arc<StreamPool>,
+    destroy_lock: Mutex<()>,
 }
 impl Drop for HostData {
     fn drop(&mut self) {
         println!("drop host data");
+        let _l = self.destroy_lock.lock().unwrap();
         unsafe {
             ctru_sys::ndspSetCallback(None, std::ptr::null_mut());
         }
@@ -42,6 +42,9 @@ pub struct Host {
 
 unsafe extern "C" fn frame_callback(data: *mut std::ffi::c_void) {
     let data = data.cast_const().cast::<HostData>().as_ref().unwrap();
+    let Ok(_l) = data.destroy_lock.try_lock() else {
+        return;
+    };
     data.streams.tick();
 }
 
@@ -54,7 +57,10 @@ impl Host {
             _ => HostUnavailable,
         })?));
         let streams = StreamPool::new(inst.clone());
-        let data = Arc::pin(HostData { inst, streams });
+        let data = Arc::pin(HostData {
+            streams,
+            destroy_lock: Default::default(),
+        });
         unsafe { ctru_sys::ndspSetCallback(Some(frame_callback), (&(*data) as *const _) as *mut _) }
         Ok(Self { data })
     }
@@ -80,12 +86,10 @@ impl HostTrait for Host {
     }
 }
 
-const NB_WAVE_BUFFERS: usize = 5;
-const DECODE_FRAMES_AHEAD: usize = 2;
+const NB_WAVE_BUFFERS: usize = 2;
 const MAX_CHANNEL: usize = 24;
 
 type StreamCallback = dyn FnMut(&mut ndsp::Channel) + Send;
-type TickCallback = dyn FnMut() + Send;
 
 struct CallbackBlock {
     id: usize,
@@ -96,7 +100,7 @@ struct StreamPool {
     ndsp: NdspWrap,
     callbacks: Mutex<Vec<CallbackBlock>>,
     next_id: AtomicUsize,
-    data_thread: JoinHandle<()>,
+    data_thread: Option<JoinHandle<()>>,
 }
 
 impl StreamPool {
@@ -105,7 +109,7 @@ impl StreamPool {
             callbacks: Default::default(),
             next_id: Default::default(),
             ndsp: NdspWrap(ndsp),
-            data_thread: std::thread::spawn({
+            data_thread: Some(std::thread::spawn({
                 let me = me.clone();
                 move || {
                     std::thread::park();
@@ -117,7 +121,7 @@ impl StreamPool {
                         std::thread::park();
                     }
                 }
-            }),
+            })),
         })
     }
 
@@ -146,13 +150,19 @@ impl StreamPool {
         let mut cbs = self.callbacks.lock().unwrap();
         for block in cbs.iter_mut() {
             let mut chan = inst.channel(chan_id as u8).unwrap();
+            chan.clear_queue();
             (block.cb.lock().unwrap())(&mut chan);
             chan_id = (chan_id + 1) % MAX_CHANNEL;
         }
     }
 
     fn tick(&self) {
-        self.data_thread.thread().unpark();
+        self.data_thread.as_ref().unwrap().thread().unpark();
+    }
+}
+impl Drop for StreamPool {
+    fn drop(&mut self) {
+        self.data_thread.take().unwrap().join().unwrap();
     }
 }
 
