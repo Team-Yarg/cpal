@@ -85,7 +85,7 @@ impl DeviceTrait for Device {
             channels: 2,
             sample_rate: crate::SampleRate(44100),
             buffer_size: SupportedBufferSize::Unknown,
-            sample_format: SampleFormat::U16,
+            sample_format: SampleFormat::I16,
         })
     }
 
@@ -118,14 +118,14 @@ impl DeviceTrait for Device {
     {
         assert!(config.channels <= 2, "too many channels");
         let format = match sample_format {
-            crate::SampleFormat::U8 => {
+            crate::SampleFormat::I8 => {
                 if config.channels == 2 {
                     AudioFormat::PCM8Stereo
                 } else {
                     AudioFormat::PCM8Mono
                 }
             }
-            crate::SampleFormat::U16 => {
+            crate::SampleFormat::I16 => {
                 if config.channels == 2 {
                     AudioFormat::PCM16Stereo
                 } else {

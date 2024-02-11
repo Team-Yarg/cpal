@@ -150,7 +150,6 @@ impl StreamPool {
         let mut cbs = self.callbacks.lock().unwrap();
         for block in cbs.iter_mut() {
             let mut chan = inst.channel(chan_id as u8).unwrap();
-            chan.clear_queue();
             (block.cb.lock().unwrap())(&mut chan);
             chan_id = (chan_id + 1) % MAX_CHANNEL;
         }
