@@ -118,6 +118,9 @@ impl StreamPool {
                             break;
                         };
                         me.tick_data();
+                        // we need to make sure to not hold this upgraded weak across the park because
+                        // otherwise we may never be unparked and get a reference cycle
+                        drop(me);
                         std::thread::park();
                     }
                 }
@@ -161,7 +164,9 @@ impl StreamPool {
 }
 impl Drop for StreamPool {
     fn drop(&mut self) {
-        self.data_thread.take().unwrap().join().unwrap();
+        let t = self.data_thread.take().unwrap();
+        t.thread().unpark();
+        t.join().unwrap();
     }
 }
 
