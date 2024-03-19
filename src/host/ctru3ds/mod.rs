@@ -3,19 +3,17 @@ use std::{
     pin::Pin,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{self, sync_channel, Receiver, Sender, SyncSender},
-        Arc, Condvar, Mutex, RwLock, Weak,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{sync_channel, SyncSender},
+        Arc, Mutex, Weak,
     },
-    thread::{JoinHandle, Thread},
-    time::Duration,
+    thread::JoinHandle,
 };
 
 use ctru::{
     linear::LinearAllocator,
     services::ndsp::{
-        self,
-        wave::{self, Wave},
+        wave::{self},
         AudioFormat, InterpolationType, Ndsp,
     },
 };
@@ -27,17 +25,13 @@ pub use stream::Stream;
 mod device;
 mod stream;
 
-struct HostData {
+pub struct HostData {
     streams: Arc<StreamPool>,
     destroy_lock: Mutex<()>,
 }
 impl Drop for HostData {
     fn drop(&mut self) {
-        println!("drop host data");
         let _l = self.destroy_lock.lock().unwrap();
-        unsafe {
-            ctru_sys::ndspSetCallback(None, std::ptr::null_mut());
-        }
     }
 }
 struct ChannelConfig {

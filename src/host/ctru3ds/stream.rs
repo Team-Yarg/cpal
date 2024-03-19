@@ -3,11 +3,9 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
 };
 
-use ctru::services::ndsp;
-
 use crate::traits::StreamTrait;
 
-use super::{HostData, StreamPool};
+use super::HostData;
 
 pub struct Stream {
     pub playing: Arc<AtomicBool>,

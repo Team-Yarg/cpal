@@ -1,28 +1,22 @@
 use std::{
-    ops::{Deref, DerefMut},
     pin::Pin,
-    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+    sync::{atomic::AtomicBool, Arc},
     time::Instant,
 };
 
-use ctru::{
-    linear::LinearAllocator,
-    services::ndsp::{self, wave, AudioFormat, Ndsp},
-};
+use ctru::services::ndsp::{self, wave, AudioFormat};
 
 use crate::{
-    host::ctru3ds::{ChannelConfig, WaveWrap, NB_WAVE_BUFFERS},
-    traits::{DeviceTrait, StreamTrait},
-    Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, SizedSample, StreamInstant,
-    SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
+    host::ctru3ds::{ChannelConfig, WaveWrap},
+    traits::DeviceTrait,
+    Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, StreamInstant,
+    SupportedBufferSize, SupportedStreamConfigRange,
 };
 
 pub type SupportedInputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 pub type SupportedOutputConfigs = std::iter::Once<SupportedStreamConfigRange>;
 
-use super::{HostData, StreamPool};
-
-const FRAME_LEN: f32 = 160.0 / 32728.0;
+use super::HostData;
 
 #[derive(Clone)]
 pub struct Device {
@@ -91,11 +85,11 @@ impl DeviceTrait for Device {
 
     fn build_input_stream_raw<D, E>(
         &self,
-        config: &crate::StreamConfig,
-        sample_format: crate::SampleFormat,
-        data_callback: D,
-        error_callback: E,
-        timeout: Option<std::time::Duration>,
+        _config: &crate::StreamConfig,
+        _sample_format: crate::SampleFormat,
+        _data_callback: D,
+        _error_callback: E,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<Self::Stream, crate::BuildStreamError>
     where
         D: FnMut(&crate::Data, &crate::InputCallbackInfo) + Send + 'static,
@@ -109,8 +103,8 @@ impl DeviceTrait for Device {
         config: &crate::StreamConfig,
         sample_format: crate::SampleFormat,
         mut data_callback: D,
-        error_callback: E,
-        timeout: Option<std::time::Duration>,
+        _error_callback: E,
+        _timeout: Option<std::time::Duration>,
     ) -> Result<Self::Stream, crate::BuildStreamError>
     where
         D: FnMut(&mut crate::Data, &crate::OutputCallbackInfo) + Send + 'static,
@@ -153,13 +147,10 @@ impl DeviceTrait for Device {
                     println!("all wave buffers have completed, uh oh");
                 }
 
-                let Some((buf_idx, WaveWrap(ref mut wave_buf))) =
+                let (buf_idx, WaveWrap(ref mut wave_buf)) =
                     wave_bufs.iter_mut().enumerate().find(|(_, w)| {
                         !matches!(w.0.status(), wave::Status::Playing | wave::Status::Queued)
-                    })
-                else {
-                    return None;
-                };
+                    })?;
                 let cfg = ChannelConfig {
                     format,
                     interp: ndsp::InterpolationType::Linear,
