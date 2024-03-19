@@ -1,6 +1,7 @@
 use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
+    ptr::NonNull,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, sync_channel, Receiver, Sender, SyncSender},
@@ -50,35 +51,50 @@ pub struct Host {
     data: Pin<Arc<HostData>>,
 }
 
-unsafe extern "C" fn frame_callback(data: *mut std::ffi::c_void) {
-    let data = data.cast_const().cast::<HostData>().as_ref().unwrap();
-    let Ok(_l) = data.destroy_lock.try_lock() else {
-        return;
-    };
-    data.streams.tick();
+unsafe extern "C" fn frame_callback<F>(data: *mut std::ffi::c_void)
+where
+    F: FnMut() -> bool + 'static,
+{
+    let mut cb = Box::from_raw(
+        NonNull::new(data as *mut F)
+            .expect("data pointer to frame_callback cannot be null")
+            .as_ptr(),
+    );
+    if (*cb)() {
+        Box::leak(cb);
+    } else {
+        drop(cb);
+        ctru_sys::ndspSetCallback(None, std::ptr::null_mut());
+    }
+}
+
+fn set_ndsp_callback<F: FnMut() -> bool + 'static>(_ndsp: &mut Ndsp, callback: F) {
+    unsafe {
+        ctru_sys::ndspSetCallback(
+            Some(frame_callback::<F>),
+            (Box::leak(Box::new(callback)) as *mut F).cast(),
+        );
+    }
 }
 
 impl Host {
     pub fn new() -> Result<Self, HostUnavailable> {
-        /*let inst = Arc::new(Mutex::new(Ndsp::new().map_err(|e| match e {
-            ctru::Error::ServiceAlreadyActive => panic!("already initialised Ndsp"),
-            ctru::Error::Os(o) => panic!("os: {o}"),
-            ctru::Error::Libc(s) => panic!("libc: {s}"),
-            _ => HostUnavailable,
-        })?));*/
-        let data = Pin::new(Arc::new_cyclic(|data| {
+        let data = Pin::new(Arc::new_cyclic(|data: &Weak<HostData>| {
             let streams = StreamPool::new({
                 let data = data.clone();
-                move || {
-                    let Some(data) = data.upgrade() else {
-                        return;
-                    };
-                    unsafe {
-                        ctru_sys::ndspSetCallback(
-                            Some(frame_callback),
-                            (&(*data) as *const _) as *mut _,
-                        )
-                    }
+                move |ndsp| {
+                    set_ndsp_callback(ndsp, move || {
+                        let Some(data) = data.upgrade() else {
+                            // make sure cleanup happens
+                            return false;
+                        };
+                        let Ok(_l) = data.destroy_lock.try_lock() else {
+                            // make sure cleanup happens
+                            return false;
+                        };
+                        data.streams.tick();
+                        true
+                    });
                 }
             });
 
@@ -152,7 +168,7 @@ struct StreamPool {
 }
 
 impl StreamPool {
-    fn new(on_init: impl FnOnce() + Send + 'static) -> Arc<Self> {
+    fn new(on_init: impl FnOnce(&mut Ndsp) + Send + 'static) -> Arc<Self> {
         let (cfg_tx, cfg_rx) = sync_channel(NB_WAVE_BUFFERS);
         Arc::new_cyclic(move |me: &Weak<Self>| Self {
             callbacks: Default::default(),
@@ -160,8 +176,8 @@ impl StreamPool {
             data_thread: Some(std::thread::spawn({
                 let me_w = me.clone();
                 move || {
-                    let ndsp = Ndsp::new().unwrap();
-                    on_init();
+                    let mut ndsp = Ndsp::new().unwrap();
+                    on_init(&mut ndsp);
                     std::thread::park();
                     'l: loop {
                         let Some(me) = me_w.upgrade() else {
