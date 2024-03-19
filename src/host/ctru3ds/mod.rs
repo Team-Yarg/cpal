@@ -1,9 +1,9 @@
 use std::{
-    ops::DerefMut,
+    ops::{Deref, DerefMut},
     pin::Pin,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc::{self, Sender},
+        mpsc::{self, sync_channel, Receiver, Sender, SyncSender},
         Arc, Condvar, Mutex, RwLock, Weak,
     },
     thread::{JoinHandle, Thread},
@@ -12,7 +12,11 @@ use std::{
 
 use ctru::{
     linear::LinearAllocator,
-    services::ndsp::{self, wave, AudioFormat, Ndsp},
+    services::ndsp::{
+        self,
+        wave::{self, Wave},
+        AudioFormat, InterpolationType, Ndsp,
+    },
 };
 
 use crate::{traits::HostTrait, HostUnavailable};
@@ -35,6 +39,12 @@ impl Drop for HostData {
         }
     }
 }
+struct ChannelConfig {
+    format: AudioFormat,
+    interp: InterpolationType,
+    sample_rate: f32,
+    buf_idx: usize,
+}
 
 pub struct Host {
     data: Pin<Arc<HostData>>,
@@ -50,18 +60,33 @@ unsafe extern "C" fn frame_callback(data: *mut std::ffi::c_void) {
 
 impl Host {
     pub fn new() -> Result<Self, HostUnavailable> {
-        let inst = Arc::new(Mutex::new(Ndsp::new().map_err(|e| match e {
+        /*let inst = Arc::new(Mutex::new(Ndsp::new().map_err(|e| match e {
             ctru::Error::ServiceAlreadyActive => panic!("already initialised Ndsp"),
             ctru::Error::Os(o) => panic!("os: {o}"),
             ctru::Error::Libc(s) => panic!("libc: {s}"),
             _ => HostUnavailable,
-        })?));
-        let streams = StreamPool::new(inst.clone());
-        let data = Arc::pin(HostData {
-            streams,
-            destroy_lock: Default::default(),
-        });
-        unsafe { ctru_sys::ndspSetCallback(Some(frame_callback), (&(*data) as *const _) as *mut _) }
+        })?));*/
+        let data = Pin::new(Arc::new_cyclic(|data| {
+            let streams = StreamPool::new({
+                let data = data.clone();
+                move || {
+                    let Some(data) = data.upgrade() else {
+                        return;
+                    };
+                    unsafe {
+                        ctru_sys::ndspSetCallback(
+                            Some(frame_callback),
+                            (&(*data) as *const _) as *mut _,
+                        )
+                    }
+                }
+            });
+
+            HostData {
+                streams,
+                destroy_lock: Default::default(),
+            }
+        }));
         Ok(Self { data })
     }
 }
@@ -87,57 +112,114 @@ impl HostTrait for Host {
 }
 
 const NB_WAVE_BUFFERS: usize = 2;
-const MAX_CHANNEL: usize = 24;
+const MAX_CHANNEL: u8 = 24;
 
-type StreamCallback = dyn FnMut(&mut ndsp::Channel) + Send;
+type StreamCallback = dyn FnMut(&mut [WaveWrap]) -> Option<ChannelConfig> + Send;
+
+struct WaveWrap(wave::Wave);
+unsafe impl Send for WaveWrap {}
+
+impl Deref for WaveWrap {
+    type Target = wave::Wave;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl DerefMut for WaveWrap {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 struct CallbackBlock {
     id: usize,
+    buffers: [WaveWrap; NB_WAVE_BUFFERS],
     cb: Arc<Mutex<StreamCallback>>,
 }
 
+struct ConfigBlock {
+    callback_idx: usize,
+    channel_idx: u8,
+    cfg: ChannelConfig,
+}
+
 struct StreamPool {
-    ndsp: NdspWrap,
     callbacks: Mutex<Vec<CallbackBlock>>,
     next_id: AtomicUsize,
     data_thread: Option<JoinHandle<()>>,
+    cfg_tx: SyncSender<ConfigBlock>,
 }
 
 impl StreamPool {
-    fn new(ndsp: Arc<Mutex<Ndsp>>) -> Arc<Self> {
-        Arc::new_cyclic(|me: &Weak<Self>| Self {
+    fn new(on_init: impl FnOnce() + Send + 'static) -> Arc<Self> {
+        let (cfg_tx, cfg_rx) = sync_channel(NB_WAVE_BUFFERS);
+        Arc::new_cyclic(move |me: &Weak<Self>| Self {
             callbacks: Default::default(),
             next_id: Default::default(),
-            ndsp: NdspWrap(ndsp),
             data_thread: Some(std::thread::spawn({
-                let me = me.clone();
+                let me_w = me.clone();
                 move || {
+                    let ndsp = Ndsp::new().unwrap();
+                    on_init();
                     std::thread::park();
-                    loop {
-                        let Some(me) = me.upgrade() else {
-                            break;
+                    'l: loop {
+                        let Some(me) = me_w.upgrade() else {
+                            break 'l;
                         };
                         me.tick_data();
-                        // we need to make sure to not hold this upgraded weak across the park because
+                        // we need to make sure to not hold this upgraded weak across the potential park because
                         // otherwise we may never be unparked and get a reference cycle
+
+                        while let Ok(ConfigBlock {
+                            callback_idx,
+                            cfg,
+                            channel_idx,
+                        }) = cfg_rx.try_recv()
+                        {
+                            let mut chan = ndsp.channel(channel_idx).unwrap();
+                            let mut block = me.callbacks.lock().unwrap();
+                            let block: &mut CallbackBlock = &mut block[callback_idx];
+                            let block = &mut block.buffers[cfg.buf_idx];
+                            chan.set_format(cfg.format);
+                            chan.set_interpolation(cfg.interp);
+                            chan.set_sample_rate(cfg.sample_rate);
+                            chan.queue_wave(block).unwrap();
+                        }
                         drop(me);
                         std::thread::park();
                     }
                 }
             })),
+            cfg_tx,
         })
     }
 
-    fn add_stream(&self, run: impl FnMut(&mut ndsp::Channel) + Send + 'static) -> usize {
+    fn add_stream(
+        &self,
+        buf_bytes: usize,
+        format: AudioFormat,
+        run: impl FnMut(&mut [WaveWrap]) -> Option<ChannelConfig> + Send + 'static,
+    ) -> usize {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.callbacks.lock().unwrap().push(CallbackBlock {
             id,
+            buffers: std::array::from_fn(|_| {
+                WaveWrap(wave::Wave::new(
+                    {
+                        let mut v = Vec::with_capacity_in(buf_bytes, LinearAllocator);
+                        v.resize(buf_bytes, 0);
+                        v.into_boxed_slice()
+                    },
+                    format,
+                    false,
+                ))
+            }),
             cb: Arc::new(Mutex::new(run)),
         });
         id
     }
     fn remove_stream(&self, id: usize) {
-        println!("remove stream");
         let mut callbacks = self.callbacks.lock().unwrap();
         let idx = callbacks
             .iter()
@@ -148,12 +230,18 @@ impl StreamPool {
 
     fn tick_data(&self) {
         // todo: scheduler to pick free channels
-        let inst = self.ndsp.0.lock().unwrap();
         let mut chan_id = 0;
         let mut cbs = self.callbacks.lock().unwrap();
-        for block in cbs.iter_mut() {
-            let mut chan = inst.channel(chan_id as u8).unwrap();
-            (block.cb.lock().unwrap())(&mut chan);
+        for (callback_idx, block) in cbs.iter_mut().enumerate() {
+            if let Some(cfg) = (block.cb.lock().unwrap())(&mut block.buffers) {
+                self.cfg_tx
+                    .send(ConfigBlock {
+                        callback_idx,
+                        channel_idx: chan_id,
+                        cfg,
+                    })
+                    .expect("failed to send config block to thread... how");
+            }
             chan_id = (chan_id + 1) % MAX_CHANNEL;
         }
     }
@@ -169,8 +257,3 @@ impl Drop for StreamPool {
         t.join().unwrap();
     }
 }
-
-struct NdspWrap(Arc<Mutex<Ndsp>>);
-
-unsafe impl Send for NdspWrap {}
-unsafe impl Sync for NdspWrap {}

@@ -11,7 +11,7 @@ use ctru::{
 };
 
 use crate::{
-    host::ctru3ds::NB_WAVE_BUFFERS,
+    host::ctru3ds::{ChannelConfig, WaveWrap, NB_WAVE_BUFFERS},
     traits::{DeviceTrait, StreamTrait},
     Data, OutputCallbackInfo, OutputStreamTimestamp, SampleFormat, SizedSample, StreamInstant,
     SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
@@ -141,38 +141,31 @@ impl DeviceTrait for Device {
         let buf_bytes = buf_samples * format.size();
         assert!(buf_bytes > 0);
         let playing = Arc::new(AtomicBool::new(false));
-        let mut wave_bufs: [WaveWrap; NB_WAVE_BUFFERS] = std::array::from_fn(|_| {
-            WaveWrap(wave::Wave::new(
-                {
-                    let mut v = Vec::with_capacity_in(buf_bytes, LinearAllocator);
-                    v.resize(buf_bytes, 0);
-                    v.into_boxed_slice()
-                },
-                format,
-                false,
-            ))
-        });
         let start = Instant::now();
         let config = config.clone();
-        let id = self.data.streams.add_stream({
+        let id = self.data.streams.add_stream(buf_bytes, format, {
             let playing = playing.clone();
-            move |chan| {
+            move |wave_bufs| {
                 if !playing.load(std::sync::atomic::Ordering::SeqCst) {
-                    return;
+                    return None;
                 }
                 if wave_bufs.iter().all(|w| w.status() == wave::Status::Done) {
                     println!("all wave buffers have completed, uh oh");
                 }
 
-                let Some(WaveWrap(ref mut wave_buf)) = wave_bufs.iter_mut().find(|w| {
-                    !matches!(w.0.status(), wave::Status::Playing | wave::Status::Queued)
-                }) else {
-                    return;
+                let Some((buf_idx, WaveWrap(ref mut wave_buf))) =
+                    wave_bufs.iter_mut().enumerate().find(|(_, w)| {
+                        !matches!(w.0.status(), wave::Status::Playing | wave::Status::Queued)
+                    })
+                else {
+                    return None;
                 };
-
-                chan.set_format(format);
-                chan.set_interpolation(ndsp::InterpolationType::Linear);
-                chan.set_sample_rate(config.sample_rate.0 as f32);
+                let cfg = ChannelConfig {
+                    format,
+                    interp: ndsp::InterpolationType::Linear,
+                    sample_rate: config.sample_rate.0 as f32,
+                    buf_idx,
+                };
 
                 let buf = wave_buf.get_buffer_mut().unwrap();
                 assert_eq!(buf.len(), buf_bytes);
@@ -189,7 +182,7 @@ impl DeviceTrait for Device {
 
                 data_callback(&mut data, &OutputCallbackInfo { timestamp });
                 wave_buf.set_sample_count(buf_samples).unwrap();
-                chan.queue_wave(wave_buf).unwrap();
+                Some(cfg)
             }
         });
         Ok(super::stream::Stream {
@@ -197,21 +190,5 @@ impl DeviceTrait for Device {
             host_data: self.data.clone(),
             id,
         })
-    }
-}
-
-struct WaveWrap(wave::Wave);
-unsafe impl Send for WaveWrap {}
-unsafe impl Sync for WaveWrap {}
-impl Deref for WaveWrap {
-    type Target = wave::Wave;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl DerefMut for WaveWrap {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
